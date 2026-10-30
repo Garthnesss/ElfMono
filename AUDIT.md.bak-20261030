@@ -1,0 +1,148 @@
+# ElfMono — Audit & Compare (2026-10-29)
+
+Three audits in one pass, all evidence-based: (A) every engine parameter probed for a real
+audible effect, (B) web UI v2 compared line-by-line against the Figma design, (C) ElfMono
+compared against the three reference monosynths from the brief. Findings ranked at the end.
+
+## A. Parameter audit — 26/26 LIVE, 0 dead controls
+
+Method (the house param-audit pattern): `cargo run --release --example audit_probe` renders,
+for each parameter, a scenario built to expose it, at baseline and with the parameter changed,
+and measures the RMS of the difference. Diff RMS > 0.005 = LIVE.
+
+| ID | Probe | Diff RMS | Verdict |
+|---|---|---|---|
+| 0 | osc1_wave → triangle | 0.496 | LIVE |
+| 1 | osc1_level → 0 | 0.359 | LIVE |
+| 2 | osc2_wave → triangle | 0.326 | LIVE |
+| 3 | osc2_detune → +600 ct | 0.315 | LIVE |
+| 4 | osc2_level → 0 | 0.216 | LIVE |
+| 5 | sub_level → 0 | 0.280 | LIVE |
+| 6 | pulse_width → 0.25 (square ctx) | 0.574 | LIVE |
+| 7 | cutoff → 200 Hz | 0.512 | LIVE |
+| 8 | resonance → 0.9 (fc 1200 ctx) | 0.237 | LIVE |
+| 9 | env_amount → 0 (fc 800 ctx) | 0.144 | LIVE |
+| 10 | key_track → 1 (fc 400, A4) | 0.268 | LIVE |
+| 11 | glide → 300 ms (phrase) | 0.557 | LIVE |
+| 12 | legato → off (retrigger ctx) | 0.102 | LIVE |
+| 13 | amp_attack → 800 ms | 0.248 | LIVE |
+| 14 | amp_decay → 1000 ms (S 0.1) | 0.300 | LIVE |
+| 15 | amp_sustain → 0.1 (D 100) | 0.371 | LIVE |
+| 16 | amp_release → 2000 ms (tail) | 0.317 | LIVE |
+| 17 | filt_attack → 600 ms (env ctx) | 0.313 | LIVE |
+| 18 | filt_decay → 1200 ms (env, S 0.1) | 0.327 | LIVE |
+| 19 | filt_sustain → 0.9 (env, D 100) | 0.304 | LIVE |
+| 20 | filt_release → 2000 ms (env tail) | 0.014 | LIVE (weakest — see F3) |
+| 21 | lfo_rate → 12 Hz (lfo→filt ctx) | 0.118 | LIVE |
+| 22 | lfo_to_filter → 0.9 | 0.106 | LIVE |
+| 23 | lfo_to_pitch → 0.9 | 0.608 | LIVE |
+| 24 | drive → 1.0 | 0.161 | LIVE |
+| 25 | volume → 0.2 | 0.380 | LIVE |
+
+UI side of the same audit: the web panel has exactly 26 controls (23 knobs + 2 wave-chip
+groups + legato switch) mapping 1:1 onto the 26 engine parameters. No fake controls,
+no orphan parameters.
+
+## B. UI fidelity: web v2 vs the Figma design
+
+Matches (verified from both sources, not eyeballed):
+- Panel 1320 wide, radius 18, all colour tokens identical to the Figma 0-1 values
+  (orange #FF8B1A, section #201B14, LCD green #9EF26B, etc.).
+- Knob model identical: 27 LED arc dots, lit 4.4px / unlit 3.2px, 7px amber pointer dot,
+  label at face+8, value at face+24, Archivo SemiBold 10.5 labels, JetBrains Mono values.
+- Knob sizes: oscillators 72, pulse 56, cutoff 118, filter row 68, strip 60, volume 72 — all match.
+- LCD 400 wide, preset name 22px mono, readout 12px; gate LED present (and live in web).
+- Layout order, wave chips, legato rocker + explainer, scope strip, 168px keyboard: match.
+
+Drift / gaps:
+- **F1 — Fonts are named but never loaded.** The web file sets `Archivo` and `JetBrains Mono`
+  and loads neither (no @font-face, no font link — grep count 0). On any machine without those
+  fonts installed, the panel falls back to system fonts and the Figma look quietly changes.
+  This is the largest visual fidelity risk in the build.
+- **F2 — ADSR knobs shrunk:** Figma 52px, web 44px (a fit decision when the envelope row
+  was laid out). Values/arcs are right; the size is not the design.
+- Minor: cutoff scale ring sits at R=94 in web vs R=86 in Figma; section heights are
+  content-driven in web vs the fixed 452px in Figma; the Figma scope is a static saw drawing
+  (350×104) where web runs a live scope (350×86) — web is better there, kept deliberately.
+- Known one-sided gap: the Figma file itself still lacks the strip + keyboard nodes
+  (Figma MCP limit, part-2 script saved), so for those two areas the web is ahead of the design file.
+
+Interaction audit (from the web source):
+- Knob drag uses pointer capture, Shift = fine, wheel steps 0.035, double-click resets. Good.
+- **F4 — Knobs have no keyboard access or ARIA.** Not focusable, no arrow-key control, no labels
+  for assistive tech. Synth Build's quality bar calls accessibility a release requirement.
+- **F5 — Velocity is a dead end in the UI.** The engine takes velocity per note (and routes it
+  to amp and filter), but every web input sends a fixed 0.9. Nothing a player does changes it.
+
+## C. Compare: ElfMono vs the references
+
+| Feature | ElfMono | Minimoog Model D | Roland SH-101 | Bass Station II |
+|---|---|---|---|---|
+| Oscillators | 2 + sub | 3 (+ osc3 as LFO) | 1 + sub | 2 + sub |
+| Noise source | **none** | yes | yes | yes |
+| Filter | TPT cascade ~24 dB/oct | 24 dB ladder | 24 dB (IR3109) | 24 dB classic + 18 dB acid |
+| Envelopes | 2× ADSR | 2× ADS(D) | 1× ADSR (shared modes) | 2× ADSR |
+| LFO | 1 (sine, to filt/pitch) | osc3 / noise as mod | 1 (tri/sqr/noise, to PWM etc.) | 2 |
+| Glide / legato | glide + true legato + note stack | glide, legato-ish | glide (portamento modes) | glide + legato modes |
+| Drive | yes, soft clip | ext-input feedback trick | no | distortion + filter drive |
+| Sequencer / arp | none | none | sequencer + arp | arp + sequencer |
+| Presets | 6 (browser only) | none (original) | none | 64 + AFX mode |
+| PWM modulation | manual PW only | LFO to PW (mod mix) | LFO/env to PW | LFO/env to PW |
+
+- **F6 — No noise source, and it's the one feature all three references share.** Noise is
+  percussion, breath, filter-FM texture and half of classic mono sound design. ElfMono is the
+  only synth in its own comparison table without it. Adding a noise source + mixer knob is
+  small (one PRNG in the core) and closes the most defensible gap.
+- Also absent vs references: LFO/env modulation of pulse width (101 and BS2 both have it;
+  ElfMono's PW is static), a second LFO (BS2), any sequencer (101/BS2; the Minimoog famously
+  has none either, so this one is defensible to skip).
+- Where ElfMono honestly wins: dual full ADSRs beat the 101's shared envelope, the held-note
+  stack with pitch fallback is better mono behaviour than any of the three, and it's the only
+  one that is playable instantly in a browser with a measured 26/26-live parameter audit.
+
+## Findings ranked
+
+1. **F6 Noise source missing** — the reference-table gap. Musical, small, engine-side.
+2. **F1 Fonts not loaded** — the design silently degrades on machines without Archivo/JetBrains Mono.
+3. **F3 Filter release is masked by amp release** (probe 20, diff 0.014): with the default
+   120 ms amp release, a 2 s filter release is nearly inaudible because the amp closes first.
+   Not a bug — an interaction players will read as "this knob does nothing". Mitigations:
+   link the two releases in presets, or document it on the panel.
+4. **F5 Velocity unreachable from the UI** — fixed 0.9 everywhere; pointer-pressure or
+   key-position velocity would wake up an existing engine path.
+5. **F2 ADSR knob size drift** (52 → 44px) — restore by widening the envelope section layout.
+6. **F4 No keyboard/ARIA on knobs** — release-bar item, not a prototype blocker.
+
+Nothing in this audit touches the earlier verdicts: cargo tests 9/9 and the render proofs
+stand, and the engine was not modified by the UI work.
+
+---
+
+## Follow-up (2026-10-30) — F6 CLOSED in code, pending Garth's ears
+
+The F6 fix was implemented exactly as prescribed above (Wave 1 fan-out, project 2 of 5):
+
+- **Engine:** a seeded xorshift32 white-noise generator (`NoiseGen`, fixed seed
+  `NOISE_SEED = 0x2545_F491`) summed into the oscillator mixer pre-filter, so noise
+  passes through the filter, both envelopes and drive. One new parameter only:
+  ID 26 `noise_level`, 0..1, default 0. It advances once per rendered sample and
+  every voice starts from the same seed, so noise renders are deterministic.
+- **Presets / UI:** all pre-existing presets reach the engine with noise at the
+  `DEFAULTS` value 0 — their sound cannot change (and measurably did not, below).
+  One new preset, BREATH (noise 0.85), exists so the source can be heard alone.
+  The web panel gained exactly one control — a NOISE LEVEL knob in the
+  Oscillators section — for 27 controls = 27 engine parameters, preserving the
+  1:1 discipline of §A.
+- **Proof:** `cargo test` 13/13 (the 9 originals untouched and green, plus 4 noise
+  tests: level-0 bit-identity + noise-only silence at 0, non-silence + broadband
+  HF at 1, same-seed determinism, on/off liveness). `audit_probe` extended to 27
+  probes, all LIVE; ID 26 `noise_level -> 0.8` diff RMS **0.1374** (threshold
+  0.005). Render proof: original three patches reproduce the 2026-10-29 baseline
+  measurements exactly (0.573/0.022, 0.365/0.078, 0.389/0.219); new twins at A2 —
+  noise-off RMS 0.197, HF 0.096; noise-on (0.9) RMS 0.279, HF 0.331; on-vs-off
+  diff RMS 0.215. Node/WASM check on the rebuilt single file: noise-only patch
+  renders 0.000000 RMS at level 0, 0.3012 at 0.9, sample-identical across synths.
+- **Status:** BUILT, NOT YET HEARD. F6 stays open in the only sense that matters
+  here until Garth's listening gate — the code-side gap (the one feature all
+  three references share) is closed.
+- F1–F5 were not touched by this change.

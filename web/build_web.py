@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Build the single-file ElfMono web prototype: cargo WASM -> wasm-bindgen no-modules -> inlined HTML."""
+import base64, pathlib, subprocess, sys, os
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+env = dict(os.environ, PATH=os.path.expanduser("~/.cargo/bin") + ":" + os.environ["PATH"])
+
+def run(*args):
+    print("+", " ".join(args))
+    subprocess.run(args, cwd=ROOT, env=env, check=True)
+
+run("cargo", "build", "--release", "--target", "wasm32-unknown-unknown", "--features", "wasm", "--lib")
+pkg = ROOT / "web" / "pkg"
+pkg.mkdir(exist_ok=True)
+run("wasm-bindgen", str(ROOT / "target/wasm32-unknown-unknown/release/elfmono.wasm"),
+    "--target", "no-modules", "--out-dir", str(pkg), "--out-name", "elfmono", "--no-typescript")
+
+glue = (pkg / "elfmono.js").read_text()
+wasm_b64 = base64.b64encode((pkg / "elfmono_bg.wasm").read_bytes()).decode()
+
+# Embedded fonts (AUDIT F1): variable woff2, latin subset, SIL OFL 1.1.
+# Embedding keeps the single file self-contained and working offline; a
+# Google Fonts <link> would silently fall back to system fonts offline.
+FONTS = [
+    ("Archivo", "100 900", ROOT / "web" / "fonts" / "archivo-latin-wght.woff2"),
+    ("JetBrains Mono", "100 800", ROOT / "web" / "fonts" / "jetbrains-mono-latin-wght.woff2"),
+]
+font_css = ""
+for family, weights, path in FONTS:
+    b64 = base64.b64encode(path.read_bytes()).decode()
+    font_css += (
+        f"@font-face{{font-family:'{family}';"
+        f"src:url(data:font/woff2;base64,{b64}) format('woff2');"
+        f"font-weight:{weights};font-style:normal;font-display:swap;}}\n  "
+    )
+
+tpl = (ROOT / "web" / "template.html").read_text()
+assert "__WASM_B64__" in tpl and "/*__GLUE__*/" in tpl and "/*__FONTS__*/" in tpl
+html = tpl.replace("/*__GLUE__*/", glue).replace("__WASM_B64__", wasm_b64)
+html = html.replace("/*__FONTS__*/", font_css)
+
+out1 = ROOT / "web" / "elfmono.html"
+out1.write_text(html)
+out2 = pathlib.Path.home() / "workspace" / "your_files" / "elfmono.html"
+out2.parent.mkdir(parents=True, exist_ok=True)
+out2.write_text(html)
+print(f"built {out1} and {out2}: {len(html)} bytes")

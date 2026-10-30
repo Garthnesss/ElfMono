@@ -1,0 +1,15 @@
+# ElfMono — Decision Records
+
+## DR-001 — Stack: Rust core + WASM web shell for v1
+- **Date:** 2026-10-29. **Decider:** Muse under Garth's Synth Build go-ahead; reversible by Garth.
+- **Context:** v1 must be heard in a browser fast (the owner's working pattern), with a core that survives a later plugin shell. Full scoring in TECHNOLOGY_EVALUATION.md.
+- **Options:** A Rust+WASM (131), B C++/JUCE (110), C TypeScript/WebAudio only (96).
+- **Decision:** A.
+- **Consequences:** plugin phase re-opens the shell question only; core, tests and presets carry over. Browser prototype audio path is a known stopgap.
+- **Revisit conditions:** plugin becomes the priority, iPad becomes v1, or the WASM PoC fails in Garth's browser.
+
+## DR-002 — Filter: TPT/Zavalishin SVF cascade, Chamberlin banned
+- **Date:** 2026-10-29.
+- **Context:** workspace lesson (Sep 29, 2026): naive Chamberlin SVF goes unstable when its f coefficient passes 1 under envelope-modulated cutoff and explodes to NaN silently. Synth Build DSP reference names the same failure and defaults to TPT.
+- **Decision:** two cascaded TPT SVF lowpass sections for ~24 dB/oct; no Chamberlin code anywhere in the crate.
+- **Revisit:** a measured ladder model (oversampled, nonlinear) is a Phase 3 candidate if Garth wants more Moog character; it replaces the sections behind the same interface.

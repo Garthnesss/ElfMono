@@ -1,0 +1,844 @@
+#![forbid(unsafe_code)]
+//! ElfMono core: one analog-style mono voice. No shell dependencies.
+//! Real-time rules: the render path allocates nothing, locks nothing, does no I/O.
+
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+pub mod wasm_api;
+
+pub const P_OSC1_WAVE: u32 = 0;
+pub const P_OSC1_LEVEL: u32 = 1;
+pub const P_OSC2_WAVE: u32 = 2;
+pub const P_OSC2_DETUNE: u32 = 3;
+pub const P_OSC2_LEVEL: u32 = 4;
+pub const P_SUB_LEVEL: u32 = 5;
+pub const P_PULSE_WIDTH: u32 = 6;
+pub const P_CUTOFF: u32 = 7;
+pub const P_RESONANCE: u32 = 8;
+pub const P_ENV_AMOUNT: u32 = 9;
+pub const P_KEY_TRACK: u32 = 10;
+pub const P_GLIDE_MS: u32 = 11;
+pub const P_LEGATO: u32 = 12;
+pub const P_AMP_A: u32 = 13;
+pub const P_AMP_D: u32 = 14;
+pub const P_AMP_S: u32 = 15;
+pub const P_AMP_R: u32 = 16;
+pub const P_FILT_A: u32 = 17;
+pub const P_FILT_D: u32 = 18;
+pub const P_FILT_S: u32 = 19;
+pub const P_FILT_R: u32 = 20;
+pub const P_LFO_RATE: u32 = 21;
+pub const P_LFO_FILTER: u32 = 22;
+pub const P_LFO_PITCH: u32 = 23;
+pub const P_DRIVE: u32 = 24;
+pub const P_VOLUME: u32 = 25;
+pub const P_NOISE_LEVEL: u32 = 26;
+
+/// Fixed seed for the noise generator: every fresh voice starts from the same
+/// state, so renders stay deterministic and testable (see DR in STATUS/AUDIT F6).
+pub const NOISE_SEED: u32 = 0x2545_F491;
+
+#[derive(Clone, Copy, Debug)]
+pub struct Params {
+    pub osc1_wave: f32,
+    pub osc1_level: f32,
+    pub osc2_wave: f32,
+    pub osc2_detune_cents: f32,
+    pub osc2_level: f32,
+    pub sub_level: f32,
+    pub pulse_width: f32,
+    pub cutoff_hz: f32,
+    pub resonance: f32,
+    pub env_amount: f32,
+    pub key_track: f32,
+    pub glide_ms: f32,
+    pub legato: bool,
+    pub amp_a_ms: f32,
+    pub amp_d_ms: f32,
+    pub amp_s: f32,
+    pub amp_r_ms: f32,
+    pub filt_a_ms: f32,
+    pub filt_d_ms: f32,
+    pub filt_s: f32,
+    pub filt_r_ms: f32,
+    pub lfo_rate_hz: f32,
+    pub lfo_to_filter: f32,
+    pub lfo_to_pitch: f32,
+    pub drive: f32,
+    pub volume: f32,
+    pub noise_level: f32,
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Self {
+            osc1_wave: 0.0,
+            osc1_level: 0.8,
+            osc2_wave: 0.0,
+            osc2_detune_cents: 7.0,
+            osc2_level: 0.5,
+            sub_level: 0.4,
+            pulse_width: 0.5,
+            cutoff_hz: 3200.0,
+            resonance: 0.25,
+            env_amount: 0.45,
+            key_track: 0.3,
+            glide_ms: 60.0,
+            legato: true,
+            amp_a_ms: 3.0,
+            amp_d_ms: 180.0,
+            amp_s: 0.8,
+            amp_r_ms: 120.0,
+            filt_a_ms: 2.0,
+            filt_d_ms: 220.0,
+            filt_s: 0.25,
+            filt_r_ms: 160.0,
+            lfo_rate_hz: 5.0,
+            lfo_to_filter: 0.0,
+            lfo_to_pitch: 0.0,
+            drive: 0.15,
+            volume: 0.8,
+            // 0 by default: every pre-noise preset renders bit-identically.
+            noise_level: 0.0,
+        }
+    }
+}
+
+fn midi_freq(note: f32) -> f32 {
+    440.0 * (2.0f32).powf((note - 69.0) / 12.0)
+}
+
+fn poly_blep(t: f32, dt: f32) -> f32 {
+    if dt <= 0.0 {
+        return 0.0;
+    }
+    if t < dt {
+        let t = t / dt;
+        2.0 * t - t * t - 1.0
+    } else if t > 1.0 - dt {
+        let t = (t - 1.0) / dt;
+        t * t + 2.0 * t + 1.0
+    } else {
+        0.0
+    }
+}
+
+fn osc_sample(wave: f32, phase: f32, dt: f32, pw: f32) -> f32 {
+    match wave.round() as i32 {
+        1 => {
+            // pulse with PolyBLEP on both edges
+            let naive = if phase < pw { 1.0 } else { -1.0 };
+            let mut p2 = phase - pw;
+            if p2 < 0.0 {
+                p2 += 1.0;
+            }
+            naive + poly_blep(phase, dt) - poly_blep(p2, dt)
+        }
+        2 => {
+            if phase < 0.5 {
+                4.0 * phase - 1.0
+            } else {
+                3.0 - 4.0 * phase
+            }
+        }
+        _ => (2.0 * phase - 1.0) - poly_blep(phase, dt),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum EnvState {
+    Idle,
+    Attack,
+    Decay,
+    Sustain,
+    Release,
+}
+
+#[derive(Clone, Copy)]
+struct Env {
+    state: EnvState,
+    level: f32,
+    release_rate: f32,
+}
+
+impl Env {
+    fn new() -> Self {
+        Self { state: EnvState::Idle, level: 0.0, release_rate: 0.0 }
+    }
+    fn trigger(&mut self) {
+        self.state = EnvState::Attack;
+    }
+    fn release(&mut self, r_ms: f32, sr: f32) {
+        if self.state == EnvState::Idle {
+            return;
+        }
+        let r_sec = (r_ms / 1000.0).max(0.001);
+        self.release_rate = self.level / (r_sec * sr);
+        self.state = EnvState::Release;
+    }
+    fn process(&mut self, a_ms: f32, d_ms: f32, s: f32, sr: f32) -> f32 {
+        match self.state {
+            EnvState::Idle => self.level = 0.0,
+            EnvState::Attack => {
+                let a_sec = (a_ms / 1000.0).max(0.0005);
+                self.level += 1.0 / (a_sec * sr);
+                if self.level >= 1.0 {
+                    self.level = 1.0;
+                    self.state = EnvState::Decay;
+                }
+            }
+            EnvState::Decay => {
+                let d_sec = (d_ms / 1000.0).max(0.0005);
+                self.level -= (1.0 - s) / (d_sec * sr);
+                if self.level <= s {
+                    self.level = s;
+                    self.state = EnvState::Sustain;
+                }
+            }
+            EnvState::Sustain => self.level = s,
+            EnvState::Release => {
+                self.level -= self.release_rate;
+                if self.level <= 0.0 {
+                    self.level = 0.0;
+                    self.state = EnvState::Idle;
+                }
+            }
+        }
+        self.level
+    }
+}
+
+/// One TPT / Zavalishin state-variable filter section (lowpass output).
+#[derive(Clone, Copy)]
+struct TptSvf {
+    ic1: f32,
+    ic2: f32,
+}
+
+impl TptSvf {
+    fn new() -> Self {
+        Self { ic1: 0.0, ic2: 0.0 }
+    }
+    fn process(&mut self, v: f32, fc: f32, resonance: f32, sr: f32) -> f32 {
+        let fc = fc.clamp(20.0, sr * 0.45);
+        let g = (core::f32::consts::PI * fc / sr).tan();
+        let k = 2.0 - 2.0 * resonance.clamp(0.0, 0.98);
+        let a1 = 1.0 / (1.0 + g * (g + k));
+        let a2 = g * a1;
+        let a3 = g * a2;
+        let v3 = v - self.ic2;
+        let v1 = a1 * self.ic1 + a2 * v3;
+        let v2 = self.ic2 + a2 * self.ic1 + a3 * v3;
+        self.ic1 = 2.0 * v1 - self.ic1;
+        self.ic2 = 2.0 * v2 - self.ic2;
+        v2
+    }
+}
+
+/// Seeded white-noise generator (xorshift32). Deterministic by construction:
+/// the same note script on a fresh voice produces the same noise, every time.
+/// Advances once per rendered sample; no allocation, no RNG crate.
+#[derive(Clone, Copy)]
+struct NoiseGen {
+    state: u32,
+}
+
+impl NoiseGen {
+    fn new() -> Self {
+        Self { state: NOISE_SEED }
+    }
+    fn next_sample(&mut self) -> f32 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.state = x;
+        // top 24 bits -> [0,1) -> [-1,1): full f32 mantissa precision
+        ((x >> 8) as f32 / 16_777_216.0) * 2.0 - 1.0
+    }
+}
+
+pub struct MonoSynth {
+    sr: f32,
+    pub params: Params,
+    stack: [u8; 16],
+    stack_len: usize,
+    velocity: f32,
+    // pitch in natural-log frequency domain, smoothed for glide
+    cur_log_freq: f32,
+    target_log_freq: f32,
+    has_pitch: bool,
+    phase1: f32,
+    phase2: f32,
+    phase_sub: f32,
+    amp_env: Env,
+    filt_env: Env,
+    // AUDIT F3 gate hold: when the filter release is longer than the amp
+    // release, the amp envelope finishes first and would mask the filter
+    // release entirely. The voice then owes `hold_left_s` more seconds of
+    // gate, rendered as a linear fade from `hold_gain` (see note_off /
+    // process_sample). Zero whenever filt_r <= amp_r.
+    hold_left_s: f32,
+    hold_total_s: f32,
+    hold_gain: f32,
+    filt1: TptSvf,
+    filt2: TptSvf,
+    lfo_phase: f32,
+    noise: NoiseGen,
+}
+
+impl MonoSynth {
+    pub fn new(sample_rate: f32) -> Self {
+        let sr = sample_rate.clamp(8_000.0, 384_000.0);
+        Self {
+            sr,
+            params: Params::default(),
+            stack: [0; 16],
+            stack_len: 0,
+            velocity: 0.0,
+            cur_log_freq: midi_freq(60.0).ln(),
+            target_log_freq: midi_freq(60.0).ln(),
+            has_pitch: false,
+            phase1: 0.0,
+            phase2: 0.0,
+            phase_sub: 0.0,
+            amp_env: Env::new(),
+            filt_env: Env::new(),
+            hold_left_s: 0.0,
+            hold_total_s: 0.0,
+            hold_gain: 0.0,
+            filt1: TptSvf::new(),
+            filt2: TptSvf::new(),
+            lfo_phase: 0.0,
+            noise: NoiseGen::new(),
+        }
+    }
+
+    pub fn set_param(&mut self, id: u32, value: f32) {
+        let p = &mut self.params;
+        match id {
+            P_OSC1_WAVE => p.osc1_wave = value,
+            P_OSC1_LEVEL => p.osc1_level = value.clamp(0.0, 1.0),
+            P_OSC2_WAVE => p.osc2_wave = value,
+            P_OSC2_DETUNE => p.osc2_detune_cents = value.clamp(-1200.0, 1200.0),
+            P_OSC2_LEVEL => p.osc2_level = value.clamp(0.0, 1.0),
+            P_SUB_LEVEL => p.sub_level = value.clamp(0.0, 1.0),
+            P_PULSE_WIDTH => p.pulse_width = value.clamp(0.05, 0.95),
+            P_CUTOFF => p.cutoff_hz = value.clamp(40.0, 18_000.0),
+            P_RESONANCE => p.resonance = value.clamp(0.0, 0.98),
+            P_ENV_AMOUNT => p.env_amount = value.clamp(-1.0, 1.0),
+            P_KEY_TRACK => p.key_track = value.clamp(0.0, 1.0),
+            P_GLIDE_MS => p.glide_ms = value.clamp(0.0, 500.0),
+            P_LEGATO => p.legato = value >= 0.5,
+            P_AMP_A => p.amp_a_ms = value.clamp(0.0, 2000.0),
+            P_AMP_D => p.amp_d_ms = value.clamp(0.0, 2000.0),
+            P_AMP_S => p.amp_s = value.clamp(0.0, 1.0),
+            P_AMP_R => p.amp_r_ms = value.clamp(0.0, 5000.0),
+            P_FILT_A => p.filt_a_ms = value.clamp(0.0, 2000.0),
+            P_FILT_D => p.filt_d_ms = value.clamp(0.0, 2000.0),
+            P_FILT_S => p.filt_s = value.clamp(0.0, 1.0),
+            P_FILT_R => p.filt_r_ms = value.clamp(0.0, 5000.0),
+            P_LFO_RATE => p.lfo_rate_hz = value.clamp(0.05, 30.0),
+            P_LFO_FILTER => p.lfo_to_filter = value.clamp(0.0, 1.0),
+            P_LFO_PITCH => p.lfo_to_pitch = value.clamp(0.0, 1.0),
+            P_DRIVE => p.drive = value.clamp(0.0, 1.0),
+            P_VOLUME => p.volume = value.clamp(0.0, 1.0),
+            P_NOISE_LEVEL => p.noise_level = value.clamp(0.0, 1.0),
+            _ => {}
+        }
+    }
+
+    fn set_target_note(&mut self, note: u8) {
+        self.target_log_freq = midi_freq(note as f32).ln();
+        if !self.has_pitch {
+            self.cur_log_freq = self.target_log_freq;
+            self.has_pitch = true;
+        }
+    }
+
+    pub fn note_on(&mut self, note: u8, velocity: f32) {
+        let was_gated = self.stack_len > 0;
+        // move-to-top if already held
+        self.remove_from_stack(note);
+        if self.stack_len < 16 {
+            self.stack[self.stack_len] = note;
+            self.stack_len += 1;
+        }
+        self.velocity = velocity.clamp(0.0, 1.0);
+        self.set_target_note(note);
+        if !was_gated || !self.params.legato {
+            // a (re)triggered gate cancels any owed filter-release hold
+            self.hold_left_s = 0.0;
+        }
+        if !was_gated {
+            // fresh gate: pitch lands instantly, envelopes fire
+            self.cur_log_freq = self.target_log_freq;
+            self.amp_env.trigger();
+            self.filt_env.trigger();
+        } else if !self.params.legato {
+            self.amp_env.trigger();
+            self.filt_env.trigger();
+        }
+        // legato: pitch target only; envelopes keep running
+    }
+
+    fn remove_from_stack(&mut self, note: u8) {
+        let mut i = 0;
+        while i < self.stack_len {
+            if self.stack[i] == note {
+                let mut j = i;
+                while j + 1 < self.stack_len {
+                    self.stack[j] = self.stack[j + 1];
+                    j += 1;
+                }
+                self.stack_len -= 1;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    pub fn note_off(&mut self, note: u8) {
+        let before = self.stack_len;
+        self.remove_from_stack(note);
+        if self.stack_len == before {
+            return;
+        }
+        if self.stack_len == 0 {
+            self.amp_env.release(self.params.amp_r_ms, self.sr);
+            self.filt_env.release(self.params.filt_r_ms, self.sr);
+            // F3: if the filter release outlasts the amp release, the voice
+            // owes the difference as gate hold, so the filter contour is
+            // heard decaying instead of being cut off by the closed VCA.
+            let owed_ms = self.params.filt_r_ms - self.params.amp_r_ms;
+            if owed_ms > 0.0 {
+                self.hold_total_s = owed_ms / 1000.0;
+                self.hold_left_s = self.hold_total_s;
+                self.hold_gain = self.amp_env.level;
+            } else {
+                self.hold_left_s = 0.0;
+                self.hold_total_s = 0.0;
+                self.hold_gain = 0.0;
+            }
+        } else {
+            // fall back to the most recent still-held note, no retrigger
+            let top = self.stack[self.stack_len - 1];
+            self.set_target_note(top);
+        }
+    }
+
+    pub fn current_freq_hz(&self) -> f32 {
+        self.cur_log_freq.exp()
+    }
+    pub fn amp_env_level(&self) -> f32 {
+        self.amp_env.level
+    }
+    pub fn is_gated(&self) -> bool {
+        self.stack_len > 0
+    }
+
+    pub fn process_sample(&mut self) -> f32 {
+        if self.amp_env.state == EnvState::Idle && self.stack_len == 0 {
+            // still advance release tails handled by env state; true idle is
+            // silent — unless a filter-release gate hold is still owed (F3)
+            if self.amp_env.level == 0.0 && self.hold_left_s <= 0.0 {
+                return 0.0;
+            }
+        }
+        let p = self.params;
+        // glide: exponential approach in log domain, tau = glide/6 so pitch is
+        // within a few cents of target by the stated glide time
+        if p.glide_ms <= 0.05 {
+            self.cur_log_freq = self.target_log_freq;
+        } else {
+            let tau = (p.glide_ms / 1000.0) / 6.0;
+            let coeff = 1.0 - (-1.0 / (tau * self.sr)).exp();
+            self.cur_log_freq += (self.target_log_freq - self.cur_log_freq) * coeff;
+        }
+        // LFO
+        self.lfo_phase += p.lfo_rate_hz / self.sr;
+        if self.lfo_phase >= 1.0 {
+            self.lfo_phase -= 1.0;
+        }
+        let lfo = (2.0 * core::f32::consts::PI * self.lfo_phase).sin();
+
+        let amp_env_level = self.amp_env.process(p.amp_a_ms, p.amp_d_ms, p.amp_s, self.sr);
+        // F3 gate hold: the amp envelope has finished but the filter release
+        // has not — keep the gate open with a linear fade from the level the
+        // amp envelope released at, reaching zero exactly when the filter
+        // release ends. Short releases (filt_r <= amp_r) never enter here.
+        let amp_level = if amp_env_level == 0.0 && self.hold_left_s > 0.0 && self.stack_len == 0 {
+            self.hold_left_s = (self.hold_left_s - 1.0 / self.sr).max(0.0);
+            if self.hold_total_s > 0.0 {
+                self.hold_gain * (self.hold_left_s / self.hold_total_s)
+            } else {
+                0.0
+            }
+        } else {
+            amp_env_level
+        };
+        let filt_level = self.filt_env.process(p.filt_a_ms, p.filt_d_ms, p.filt_s, self.sr);
+
+        let base_freq = self.cur_log_freq.exp();
+        let freq = base_freq * (2.0f32).powf(lfo * p.lfo_to_pitch / 12.0);
+        let midi_float = 69.0 + 12.0 * (base_freq / 440.0).log2();
+
+        // oscillators
+        let dt1 = freq / self.sr;
+        let s1 = osc_sample(p.osc1_wave, self.phase1, dt1, p.pulse_width);
+        self.phase1 += dt1;
+        if self.phase1 >= 1.0 { self.phase1 -= 1.0; }
+
+        let freq2 = freq * (2.0f32).powf(p.osc2_detune_cents / 1200.0);
+        let dt2 = freq2 / self.sr;
+        let s2 = osc_sample(p.osc2_wave, self.phase2, dt2, p.pulse_width);
+        self.phase2 += dt2;
+        if self.phase2 >= 1.0 { self.phase2 -= 1.0; }
+
+        let dt_sub = (freq * 0.5) / self.sr;
+        // plain square sub: an octave down, its fundamental dominates and aliasing is minimal
+        let sub_val = if self.phase_sub < 0.5 { 0.9 } else { -0.9 };
+        self.phase_sub += dt_sub;
+        if self.phase_sub >= 1.0 { self.phase_sub -= 1.0; }
+
+        // noise advances every rendered sample (like the oscillator phases),
+        // so its contribution is a pure function of the note script; at
+        // level 0 the term is exactly 0.0 and the old sound is bit-identical.
+        let noise_val = self.noise.next_sample();
+        let mixed = s1 * p.osc1_level + s2 * p.osc2_level + sub_val * p.sub_level
+            + noise_val * p.noise_level;
+
+        // filter cutoff modulation, in octaves
+        let mod_oct = p.env_amount * filt_level * 4.0
+            + lfo * p.lfo_to_filter * 2.0
+            + ((midi_float - 60.0) / 12.0) * p.key_track
+            + (self.velocity - 0.5) * 0.5;
+        let fc = p.cutoff_hz * (2.0f32).powf(mod_oct);
+        let filtered = self.filt2.process(
+            self.filt1.process(mixed, fc, p.resonance, self.sr),
+            fc,
+            p.resonance * 0.7,
+            self.sr,
+        );
+
+        let gained = filtered * amp_level * (0.3 + 0.7 * self.velocity.max(0.4));
+        let drive_gain = 1.0 + p.drive * 8.0;
+        let driven = if p.drive > 0.001 {
+            (gained * drive_gain).tanh() / (1.0 + p.drive * 0.8)
+        } else {
+            gained
+        };
+        (driven * p.volume).clamp(-1.0, 1.0)
+    }
+
+    pub fn render(&mut self, out: &mut [f32]) {
+        for s in out.iter_mut() {
+            *s = self.process_sample();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SR: f32 = 44_100.0;
+
+    fn render_n(s: &mut MonoSynth, n: usize) -> Vec<f32> {
+        let mut buf = vec![0.0f32; n];
+        s.render(&mut buf);
+        buf
+    }
+    fn rms(buf: &[f32]) -> f32 {
+        (buf.iter().map(|x| x * x).sum::<f32>() / buf.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn idle_silence() {
+        let mut s = MonoSynth::new(SR);
+        let buf = render_n(&mut s, 44_100);
+        assert!(buf.iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn no_nan_bounded_worst_case() {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(P_RESONANCE, 0.95);
+        s.set_param(P_DRIVE, 1.0);
+        s.set_param(P_ENV_AMOUNT, 1.0);
+        s.set_param(P_OSC2_LEVEL, 1.0);
+        s.set_param(P_SUB_LEVEL, 1.0);
+        s.set_param(P_LFO_FILTER, 1.0);
+        s.set_param(P_NOISE_LEVEL, 1.0);
+        for note in [24u8, 36, 48, 60, 72, 84, 96, 108] {
+            s.note_on(note, 1.0);
+            let buf = render_n(&mut s, 11_025);
+            assert!(buf.iter().all(|x| x.is_finite()), "non-finite at note {note}");
+            assert!(buf.iter().all(|x| x.abs() <= 1.0), "over 1.0 at note {note}");
+            s.note_off(note);
+        }
+    }
+
+    #[test]
+    fn pitch_accuracy_a4() {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(P_OSC2_LEVEL, 0.0);
+        s.set_param(P_SUB_LEVEL, 0.0);
+        s.set_param(P_CUTOFF, 18_000.0);
+        s.set_param(P_ENV_AMOUNT, 0.0);
+        s.set_param(P_KEY_TRACK, 0.0);
+        s.set_param(P_DRIVE, 0.0);
+        s.note_on(69, 1.0);
+        let _ = render_n(&mut s, 22_050); // settle past attack
+        let buf = render_n(&mut s, 44_100);
+        let mut crossings = 0usize;
+        for w in buf.windows(2) {
+            if w[0] < 0.0 && w[1] >= 0.0 {
+                crossings += 1;
+            }
+        }
+        let est = crossings as f32; // ~1 s of audio
+        assert!((435.0..=445.0).contains(&est), "estimated {est} Hz, want ~440");
+    }
+
+    #[test]
+    fn filter_darkens() {
+        let measure = |cutoff: f32| -> f32 {
+            let mut s = MonoSynth::new(SR);
+            s.set_param(P_CUTOFF, cutoff);
+            s.set_param(P_ENV_AMOUNT, 0.0);
+            s.set_param(P_KEY_TRACK, 0.0);
+            s.set_param(P_DRIVE, 0.0);
+            s.note_on(48, 1.0);
+            let _ = render_n(&mut s, 11_025);
+            let buf = render_n(&mut s, 22_050);
+            buf.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f32>() / buf.len() as f32
+        };
+        let dark = measure(300.0);
+        let bright = measure(12_000.0);
+        assert!(dark < bright * 0.5, "dark {dark} vs bright {bright}");
+    }
+
+    #[test]
+    fn legato_no_retrigger() {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(P_AMP_A, 2.0);
+        s.set_param(P_AMP_D, 50.0);
+        s.set_param(P_AMP_S, 0.8);
+        s.note_on(60, 1.0);
+        let _ = render_n(&mut s, 22_050); // into sustain
+        let before = s.amp_env_level();
+        s.note_on(67, 1.0); // legato change
+        let _ = render_n(&mut s, 4_410);
+        let after = s.amp_env_level();
+        assert!(before >= 0.75, "sustain before {before}");
+        assert!(after >= before * 0.9, "env dropped on legato: {before} -> {after}");
+    }
+
+    #[test]
+    fn glide_lands() {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(P_GLIDE_MS, 300.0);
+        s.note_on(60, 1.0);
+        let _ = render_n(&mut s, 4_410);
+        s.note_on(72, 1.0);
+        let _ = render_n(&mut s, (SR * 0.15) as usize); // halfway in time
+        let mid = s.current_freq_hz();
+        assert!(mid > midi_freq(66.0), "mid glide freq {mid} should be past the midpoint");
+        let _ = render_n(&mut s, (SR * 0.16) as usize); // >300 ms total
+        let end = s.current_freq_hz();
+        let cents = 1200.0 * (end / midi_freq(72.0)).log2();
+        assert!(cents.abs() < 5.0, "landed {cents} cents off");
+    }
+
+    #[test]
+    fn release_to_silence() {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(P_AMP_R, 150.0);
+        s.note_on(60, 1.0);
+        let _ = render_n(&mut s, 22_050);
+        s.note_off(60);
+        let buf = render_n(&mut s, 44_100);
+        let tail = rms(&buf[buf.len() - 4_410..]);
+        assert!(tail < 0.001, "tail rms {tail}");
+    }
+
+    #[test]
+    fn deterministic() {
+        let script = |s: &mut MonoSynth| -> Vec<f32> {
+            s.note_on(45, 0.9);
+            let mut out = render_n(s, 11_025);
+            s.note_on(57, 0.9);
+            out.extend(render_n(s, 11_025));
+            s.note_off(57);
+            s.note_off(45);
+            out.extend(render_n(s, 11_025));
+            out
+        };
+        let a = script(&mut MonoSynth::new(SR));
+        let b = script(&mut MonoSynth::new(SR));
+        assert_eq!(a, b);
+    }
+
+    fn noise_only_synth(noise_level: f32) -> MonoSynth {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(P_OSC1_LEVEL, 0.0);
+        s.set_param(P_OSC2_LEVEL, 0.0);
+        s.set_param(P_SUB_LEVEL, 0.0);
+        s.set_param(P_CUTOFF, 18_000.0);
+        s.set_param(P_ENV_AMOUNT, 0.0);
+        s.set_param(P_KEY_TRACK, 0.0);
+        s.set_param(P_DRIVE, 0.0);
+        s.set_param(P_NOISE_LEVEL, noise_level);
+        s
+    }
+
+    #[test]
+    fn noise_level_zero_contributes_nothing() {
+        // at level 0 the mixer term is exactly 0.0 * noise: output must be
+        // bit-identical to a synth that never touches the noise parameter
+        let script = |s: &mut MonoSynth| -> Vec<f32> {
+            s.note_on(45, 0.9);
+            let mut out = render_n(s, 11_025);
+            s.note_on(57, 0.9);
+            out.extend(render_n(s, 11_025));
+            s.note_off(57);
+            s.note_off(45);
+            out.extend(render_n(s, 11_025));
+            out
+        };
+        let plain = script(&mut MonoSynth::new(SR));
+        let mut with_zero = MonoSynth::new(SR);
+        with_zero.set_param(P_NOISE_LEVEL, 0.0);
+        let zeroed = script(&mut with_zero);
+        assert_eq!(plain, zeroed);
+        // and a noise-only patch at level 0 is pure silence
+        let mut s = noise_only_synth(0.0);
+        s.note_on(57, 1.0);
+        let buf = render_n(&mut s, 22_050);
+        assert!(buf.iter().all(|&x| x == 0.0), "noise at 0 leaked into the render");
+    }
+
+    #[test]
+    fn noise_renders_non_silence_and_is_broadband() {
+        let mut s = noise_only_synth(1.0);
+        s.note_on(57, 1.0);
+        let _ = render_n(&mut s, 11_025); // settle past attack
+        let buf = render_n(&mut s, 22_050);
+        let r = rms(&buf);
+        assert!(r > 0.05, "noise-only render too quiet: rms {r}");
+        assert!(buf.iter().all(|x| x.is_finite() && x.abs() <= 1.0));
+        // white noise through an open filter keeps most energy in the
+        // differenced (high-frequency) band, unlike any pitched source
+        let diff_rms = (buf.windows(2).map(|w| (w[1] - w[0]).powi(2)).sum::<f32>()
+            / buf.len() as f32)
+            .sqrt();
+        let hf = diff_rms / r;
+        assert!(hf > 0.8, "noise hf_ratio {hf}, expected broadband");
+    }
+
+    #[test]
+    fn noise_is_deterministic_with_same_seed() {
+        let render = || {
+            let mut s = noise_only_synth(0.8);
+            s.set_param(P_OSC1_LEVEL, 0.4);
+            s.note_on(45, 0.9);
+            let out = render_n(&mut s, 22_050);
+            s.note_off(45);
+            out
+        };
+        assert_eq!(render(), render());
+    }
+
+    #[test]
+    fn noise_level_is_live() {
+        // audit-style probe: same patch, noise 0 vs 0.8 -> large diff RMS
+        let render = |lvl: f32| {
+            let mut s = MonoSynth::new(SR);
+            s.set_param(P_NOISE_LEVEL, lvl);
+            s.note_on(45, 0.9);
+            render_n(&mut s, 22_050)
+        };
+        let off = render(0.0);
+        let on = render(0.8);
+        let diff = (off.iter().zip(&on).map(|(a, b)| (a - b).powi(2)).sum::<f32>()
+            / off.len() as f32)
+            .sqrt();
+        assert!(diff > 0.005, "noise probe diff rms {diff}, param would read as dead");
+    }
+
+    #[test]
+    fn filter_release_outlives_amp_release() {
+        // AUDIT F3: probe-20 scenario (fc 300, env amount 1) at the default
+        // 120 ms amp release. A 2000 ms filter release must stay audible well
+        // past the point where the amp envelope alone would have closed,
+        // and the voice must still reach silence once it has run its course.
+        let patch = |filt_r: f32| -> Vec<f32> {
+            let mut s = MonoSynth::new(SR);
+            s.set_param(P_CUTOFF, 300.0);
+            s.set_param(P_ENV_AMOUNT, 1.0);
+            s.set_param(P_FILT_R, filt_r);
+            s.note_on(45, 1.0);
+            let mut out = render_n(&mut s, 15_435); // 0.35 s hold
+            s.note_off(45);
+            out.extend(render_n(&mut s, 108_045)); // 2.45 s tail
+            out
+        };
+        let win = |buf: &[f32], t0: f32, t1: f32| -> f32 {
+            let a = (t0 * SR) as usize;
+            let b = ((t1 * SR) as usize).min(buf.len());
+            rms(&buf[a..b])
+        };
+        let long = patch(2000.0);
+        let short = patch(160.0);
+        // window 0.5-2.0 s after note-off (note-off at 0.35 s)
+        let long_win = win(&long, 0.85, 2.35);
+        let short_win = win(&short, 0.85, 2.35);
+        assert!(long_win > 0.02, "long filter release masked: window rms {long_win}");
+        assert!(short_win < 0.002, "short filter release should be silent: {short_win}");
+        let diff = (long.iter().zip(&short).map(|(a, b)| (a - b).powi(2)).sum::<f32>()
+            / long.len() as f32)
+            .sqrt();
+        assert!(diff > 0.05, "filter release diff rms {diff}, still reads as dead");
+        // and it does end: last 0.1 s of the long render is silence
+        let end = rms(&long[long.len() - 4_410..]);
+        assert!(end < 0.001, "long release never ends: tail rms {end}");
+    }
+
+    #[test]
+    fn short_releases_not_extended() {
+        // F3 guard: at defaults the owed hold is only 160-120 = 40 ms, and
+        // when filt_r <= amp_r there is no hold at all — tails must still
+        // die on the amp envelope's schedule, not linger.
+        let mut s = MonoSynth::new(SR);
+        s.note_on(60, 1.0);
+        let _ = render_n(&mut s, 15_435);
+        s.note_off(60);
+        let tail = render_n(&mut s, 26_460); // 0.6 s
+        let late = rms(&tail[13_230..]); // second half: >0.3 s after note-off
+        assert!(late < 0.001, "default tail lingers: rms {late}");
+
+        let mut s = MonoSynth::new(SR);
+        s.set_param(P_AMP_R, 500.0);
+        s.set_param(P_FILT_R, 100.0);
+        s.note_on(60, 1.0);
+        let _ = render_n(&mut s, 15_435);
+        s.note_off(60);
+        let tail = render_n(&mut s, 35_280); // 0.8 s
+        let late = rms(&tail[tail.len() - 8_820..]);
+        assert!(late < 0.001, "filt_r < amp_r tail lingers: rms {late}");
+    }
+
+    #[test]
+    fn note_stack_fallback() {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(P_GLIDE_MS, 0.0);
+        s.note_on(60, 1.0);
+        s.note_on(64, 1.0);
+        let _ = render_n(&mut s, 1_000);
+        assert!((s.current_freq_hz() - midi_freq(64.0)).abs() < 1.0);
+        s.note_off(64);
+        let _ = render_n(&mut s, 1_000);
+        assert!((s.current_freq_hz() - midi_freq(60.0)).abs() < 1.0, "freq {}", s.current_freq_hz());
+        assert!(s.is_gated());
+    }
+}

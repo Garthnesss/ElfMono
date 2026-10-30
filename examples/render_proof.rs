@@ -1,0 +1,174 @@
+//! Offline render proof: renders musical patches to WAV and prints measurements.
+//! The original three patches never touch the noise parameter (default 0), so
+//! their measurements double as the pre-noise regression baseline; a fourth
+//! patch is rendered as noise-off / noise-on twins (AUDIT F6 proof).
+//! Run: cargo run --release --example render_proof
+use elfmono::*;
+use std::fs::File;
+use std::io::Write;
+
+const SR: f32 = 44_100.0;
+
+fn write_wav(path: &str, samples: &[f32]) {
+    let mut f = File::create(path).unwrap();
+    let data_len = (samples.len() * 2) as u32;
+    f.write_all(b"RIFF").unwrap();
+    f.write_all(&(36 + data_len).to_le_bytes()).unwrap();
+    f.write_all(b"WAVEfmt ").unwrap();
+    f.write_all(&16u32.to_le_bytes()).unwrap();
+    f.write_all(&1u16.to_le_bytes()).unwrap(); // PCM
+    f.write_all(&1u16.to_le_bytes()).unwrap(); // mono
+    f.write_all(&(SR as u32).to_le_bytes()).unwrap();
+    f.write_all(&((SR as u32) * 2).to_le_bytes()).unwrap();
+    f.write_all(&2u16.to_le_bytes()).unwrap();
+    f.write_all(&16u16.to_le_bytes()).unwrap();
+    f.write_all(b"data").unwrap();
+    f.write_all(&data_len.to_le_bytes()).unwrap();
+    for s in samples {
+        let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+        f.write_all(&v.to_le_bytes()).unwrap();
+    }
+}
+
+fn report(name: &str, buf: &[f32]) {
+    let rms = (buf.iter().map(|x| x * x).sum::<f32>() / buf.len() as f32).sqrt();
+    let peak = buf.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+    let nan = buf.iter().any(|x| !x.is_finite());
+    // spectral centroid proxy via zero-crossing + difference energy is in unit tests;
+    // here: high-frequency energy ratio (differenced RMS / RMS)
+    let diff_rms = (buf.windows(2).map(|w| (w[1] - w[0]).powi(2)).sum::<f32>() / buf.len() as f32).sqrt();
+    println!("{name}: rms={rms:.4} ({:.1} dBFS) peak={peak:.4} hf_ratio={:.3} nan={nan}",
+        20.0 * rms.max(1e-9).log10(), diff_rms / rms.max(1e-9));
+    assert!(!nan && peak <= 1.0 && rms > 0.01, "{name} failed sanity");
+}
+
+fn render(s: &mut MonoSynth, secs: f32) -> Vec<f32> {
+    let mut b = vec![0.0; (SR * secs) as usize];
+    s.render(&mut b);
+    b
+}
+
+fn main() {
+    std::fs::create_dir_all("tests_render").unwrap();
+
+    // Deep Bass: C2 held
+    let mut s = MonoSynth::new(SR);
+    s.set_param(P_CUTOFF, 900.0);
+    s.set_param(P_RESONANCE, 0.3);
+    s.set_param(P_ENV_AMOUNT, 0.5);
+    s.set_param(P_SUB_LEVEL, 0.9);
+    s.set_param(P_GLIDE_MS, 20.0);
+    s.note_on(36, 1.0);
+    let buf = render(&mut s, 1.5);
+    s.note_off(36);
+    report("deep_bass_C2", &buf);
+    write_wav("tests_render/deep_bass_C2.wav", &buf);
+
+    // Acid: A1 with resonant env sweep, short decay
+    let mut s = MonoSynth::new(SR);
+    s.set_param(P_CUTOFF, 700.0);
+    s.set_param(P_RESONANCE, 0.85);
+    s.set_param(P_ENV_AMOUNT, 0.9);
+    s.set_param(P_FILT_D, 300.0);
+    s.set_param(P_FILT_S, 0.05);
+    s.set_param(P_AMP_D, 300.0);
+    s.set_param(P_AMP_S, 0.4);
+    s.set_param(P_SUB_LEVEL, 0.2);
+    s.note_on(45, 1.0);
+    let buf = render(&mut s, 1.5);
+    s.note_off(45);
+    report("acid_A1", &buf);
+    write_wav("tests_render/acid_A1.wav", &buf);
+
+    // Glide Lead: legato phrase C5 -> G5 -> E5 with 180 ms glide
+    let mut s = MonoSynth::new(SR);
+    s.set_param(P_CUTOFF, 4500.0);
+    s.set_param(P_RESONANCE, 0.2);
+    s.set_param(P_GLIDE_MS, 180.0);
+    s.set_param(P_SUB_LEVEL, 0.0);
+    s.set_param(P_OSC2_LEVEL, 0.3);
+    let mut buf = Vec::new();
+    s.note_on(72, 0.9);
+    buf.extend(render(&mut s, 0.5));
+    s.note_on(79, 0.9);
+    buf.extend(render(&mut s, 0.5));
+    s.note_off(79);
+    s.note_on(76, 0.9);
+    buf.extend(render(&mut s, 0.5));
+    s.note_off(76);
+    s.note_off(72);
+    buf.extend(render(&mut s, 0.3));
+    report("glide_lead_phrase", &buf);
+    write_wav("tests_render/glide_lead_phrase.wav", &buf);
+
+    // Noise proof (AUDIT F6, 2026-10-30): a breath patch rendered twice from
+    // fresh synths — identical settings except noise_level. The off twin must
+    // behave exactly like the pre-noise engine; the on twin must measure
+    // measurably different (RMS + HF ratio) and broadband.
+    let noise_patch = |noise_level: f32| -> Vec<f32> {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(P_OSC1_LEVEL, 0.3);
+        s.set_param(P_OSC2_LEVEL, 0.0);
+        s.set_param(P_SUB_LEVEL, 0.1);
+        s.set_param(P_CUTOFF, 2500.0);
+        s.set_param(P_RESONANCE, 0.4);
+        s.set_param(P_ENV_AMOUNT, 0.5);
+        s.set_param(P_DRIVE, 0.1);
+        s.set_param(P_NOISE_LEVEL, noise_level);
+        s.note_on(57, 1.0);
+        let buf = render(&mut s, 1.5);
+        s.note_off(57);
+        buf
+    };
+    let off = noise_patch(0.0);
+    let on = noise_patch(0.9);
+    report("noise_off_twin_A2", &off);
+    write_wav("tests_render/noise_off_twin_A2.wav", &off);
+    report("noise_breath_A2", &on);
+    write_wav("tests_render/noise_breath_A2.wav", &on);
+    let diff_rms = (off.iter().zip(&on).map(|(a, b)| (a - b).powi(2)).sum::<f32>()
+        / off.len() as f32)
+        .sqrt();
+    println!("noise on-vs-off: diff_rms={diff_rms:.4}");
+    assert!(diff_rms > 0.05, "noise on/off renders too similar: diff_rms {diff_rms}");
+
+    // Filter-release audibility (AUDIT F3, 2026-10-30): probe-20 scenario
+    // (cutoff 300, env_amount 1) at the DEFAULT amp release (120 ms), rendered
+    // with filt_release 2000 ms vs the 160 ms default over a long tail. Before
+    // the fix the amp envelope closed at ~120 ms and masked the filter
+    // release (audit probe 20 diff RMS 0.0142); the fix holds the gate open
+    // for the owed remainder, so the 0.5-2.0 s tail window must now carry
+    // real, decaying signal for the long release and ~silence for the short.
+    let frel_patch = |filt_r: f32| -> Vec<f32> {
+        let mut s = MonoSynth::new(SR);
+        s.set_param(P_CUTOFF, 300.0);
+        s.set_param(P_ENV_AMOUNT, 1.0);
+        s.set_param(P_FILT_R, filt_r);
+        s.note_on(45, 1.0);
+        let mut buf = render(&mut s, 0.35);
+        s.note_off(45);
+        buf.extend(render(&mut s, 2.45));
+        buf
+    };
+    let win_rms = |buf: &[f32], t0: f32, t1: f32| -> f32 {
+        let a = (t0 * SR) as usize;
+        let b = ((t1 * SR) as usize).min(buf.len());
+        (buf[a..b].iter().map(|x| x * x).sum::<f32>() / (b - a) as f32).sqrt()
+    };
+    let long = frel_patch(2000.0);
+    let short = frel_patch(160.0);
+    // note-off happens at 0.35 s; window 0.5-2.0 s after it:
+    let long_win = win_rms(&long, 0.85, 2.35);
+    let short_win = win_rms(&short, 0.85, 2.35);
+    let fr_diff = (long.iter().zip(&short).map(|(a, b)| (a - b).powi(2)).sum::<f32>()
+        / long.len() as f32)
+        .sqrt();
+    println!("filt_release tail window (0.5-2.0 s after note-off): long(2000 ms)={long_win:.4} short(160 ms)={short_win:.4}");
+    println!("filt_release long-vs-short: diff_rms={fr_diff:.4}");
+    write_wav("tests_render/filt_release_tail_A1.wav", &long);
+    assert!(short_win < 0.002, "short filter release should be silent in the window: {short_win}");
+    assert!(long_win > 0.02, "long filter release inaudible in the window: {long_win}");
+    assert!(fr_diff > 0.05, "filter release still masked: diff_rms {fr_diff}");
+
+    println!("render proof OK: 6 WAVs in tests_render/");
+}
