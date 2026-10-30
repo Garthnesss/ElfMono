@@ -1,2 +1,7 @@
 target/
+web/pkg/
+ab/old/web/pkg/
+web/elfmono.html
 ab/elfmono-ab.html
+tests_render/
+*.bak-*
