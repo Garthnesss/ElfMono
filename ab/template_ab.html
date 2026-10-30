@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ElfMono — A/B Compare: Old (Oct 29) vs New (Oct 30)</title>
+<style>
+  /* Fonts embedded by build_web.py (AUDIT F1 fix): Archivo + JetBrains Mono
+     variable woff2, latin subset, SIL OFL 1.1 — licences in web/fonts/. */
+  /*__FONTS__*/
+  /* Design tokens — from "ElfMono — Panel Design" in Figma */
+  :root{
+    --bg:#12100c; --panel:#16130e; --section:#201b14; --line:#3d3325;
+    --knob-hi:#423a2f; --knob-lo:#1a1611; --knob-line:#61543f;
+    --orange:#ff8b1a; --amber:#ffb84d; --track:#3b3329;
+    --txt:#ede3d1; --label:#b8a88e; --dim:#736a5a;
+    --lcd-bg:#0d1308; --lcd:#9ef26b; --red:#ff4030;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:Archivo,system-ui,sans-serif;display:flex;justify-content:center;padding:18px 10px 30px;}
+  #panel{width:1320px;max-width:100%;background:var(--panel);border:2px solid var(--line);border-radius:18px;padding:20px 24px 24px;position:relative;}
+  .screw{position:absolute;width:14px;height:14px;border-radius:50%;background:var(--knob-lo);border:1.5px solid var(--knob-line);}
+  .screw:after{content:'';position:absolute;left:5px;top:5px;width:4px;height:4px;border-radius:50%;background:var(--dim);}
+  /* top bar */
+  header{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;}
+  .logo{font-weight:900;font-size:34px;letter-spacing:1px;line-height:1;padding-top:2px;}
+  .tagline{color:var(--orange);font-size:10px;font-weight:600;letter-spacing:3.5px;margin-top:7px;}
+  #lcd{background:var(--lcd-bg);border:1px solid var(--line);border-radius:8px;width:400px;max-width:100%;padding:9px 16px 7px;position:relative;}
+  #lcdPreset{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:22px;color:var(--lcd);}
+  #lcdReadout{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--lcd);opacity:.85;margin-top:2px;white-space:nowrap;overflow:hidden;}
+  #gateLed{position:absolute;right:14px;top:14px;width:8px;height:8px;border-radius:50%;background:#40150f;}
+  #gateLed.on{background:var(--red);box-shadow:0 0 8px var(--red);}
+  .topRight{flex:1;min-width:280px;}
+  .pills{display:flex;gap:8px;flex-wrap:wrap;}
+  .pill{background:var(--section);color:var(--label);border:1px solid var(--line);border-radius:999px;padding:7px 13px;font-size:10.5px;font-weight:600;letter-spacing:.6px;cursor:pointer;font-family:Archivo,system-ui,sans-serif;}
+  .pill.active{background:var(--orange);color:var(--panel);border-color:var(--orange);}
+  .pill .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--track);margin-right:7px;vertical-align:0;}
+  .pill.on .dot{background:var(--orange);}
+  .pill.on{color:var(--txt);}
+  #startBtn{background:#ff6a3d;color:#fff;border:0;border-radius:8px;padding:9px 16px;font-size:14px;cursor:pointer;font-weight:700;}
+  #status{color:var(--dim);font-size:12px;margin-top:8px;}
+  .credit{color:var(--dim);font-size:11px;margin-top:6px;}
+  /* sections */
+  main{display:grid;grid-template-columns:400px 400px 1fr;gap:16px;margin-top:18px;}
+  @media(max-width:1100px){main{grid-template-columns:1fr 1fr;}}
+  @media(max-width:720px){main{grid-template-columns:1fr;}}
+  section{background:var(--section);border:1px solid var(--line);border-radius:12px;padding:12px 16px 16px;}
+  section h2{margin:0 0 4px;font-size:12px;letter-spacing:2px;color:var(--orange);font-weight:600;}
+  section .rule{height:1.5px;background:var(--line);margin:6px 0 10px;}
+  .knobGrid{display:grid;grid-template-columns:1fr 1fr;justify-items:center;}
+  .knobRow{display:flex;justify-content:space-around;flex-wrap:wrap;}
+  /* knob */
+  .knob{position:relative;user-select:none;touch-action:none;}
+  .knob .face{position:absolute;border-radius:50%;background:radial-gradient(circle at 35% 30%,var(--knob-hi),var(--knob-lo) 72%);border:1.5px solid var(--knob-line);cursor:ns-resize;box-shadow:0 4px 10px rgba(0,0,0,.5), inset 0 1px 2px rgba(255,255,255,.12);}
+  .knob .face:focus{outline:2px solid var(--orange);outline-offset:3px;}
+  .knob .cap{position:absolute;border-radius:50%;background:rgba(255,255,255,.05);pointer-events:none;}
+  .knob .pdot{position:absolute;width:7px;height:7px;border-radius:50%;background:var(--amber);pointer-events:none;box-shadow:0 0 5px rgba(255,184,77,.7);}
+  .knob .ardot{position:absolute;border-radius:50%;pointer-events:none;}
+  .knob .klabel{position:absolute;left:50%;transform:translateX(-50%);width:150px;text-align:center;font-size:10.5px;font-weight:600;letter-spacing:1px;color:var(--label);white-space:nowrap;}
+  .knob .kvalue{position:absolute;left:50%;transform:translateX(-50%);width:150px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--orange);white-space:nowrap;}
+  .scaleLbl{position:absolute;font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--dim);transform:translate(-50%,-50%);pointer-events:none;}
+  /* wave chips */
+  .waveBlock{margin-top:2px;}
+  .waveBlock .wlabel{font-size:10px;font-weight:600;letter-spacing:1px;color:var(--label);margin-bottom:6px;}
+  .chips{display:flex;gap:8px;}
+  .chip{flex:1;background:var(--panel);color:var(--label);border:1px solid var(--line);border-radius:5px;padding:6px 0;font-size:10px;font-weight:600;cursor:pointer;text-align:center;}
+  .chip.on{background:var(--orange);color:var(--panel);border-color:var(--orange);}
+  /* ADSR */
+  .adsrTitle{font-size:10.5px;font-weight:600;letter-spacing:1.5px;color:var(--txt);margin:8px 0 2px;}
+  .legatoRow{display:flex;gap:16px;align-items:flex-start;margin-top:12px;}
+  .rocker{width:72px;height:28px;border-radius:6px;background:var(--panel);border:1px solid var(--line);position:relative;cursor:pointer;flex:none;}
+  .rocker .rk{position:absolute;left:4px;top:4px;width:32px;height:20px;border-radius:4px;background:var(--track);transition:left .12s,background .12s;}
+  .rocker.on .rk{left:36px;background:var(--orange);}
+  .rocker .rt{position:absolute;right:8px;top:7px;font-size:10px;font-weight:600;color:var(--orange);}
+  .explain{color:var(--dim);font-size:11px;line-height:1.5;}
+  /* strip */
+  #strip{margin-top:16px;}
+  .stripInner{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;}
+  #scopeWrap{background:var(--lcd-bg);border:1px solid var(--line);border-radius:8px;padding:6px;flex:none;}
+  #scope{display:block;}
+  .scopeCap{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--dim);margin-top:3px;}
+  .stripKnobs{display:flex;flex:1;justify-content:space-around;flex-wrap:wrap;}
+  /* keyboard */
+  #keys{position:relative;height:168px;margin-top:18px;user-select:none;touch-action:none;}
+  .key{position:absolute;bottom:0;border:1px solid #000;border-radius:0 0 5px 5px;cursor:pointer;}
+  .key.white{background:linear-gradient(#fdf8ea,#e9dec3);}
+  .key.black{background:linear-gradient(#3a3a3a,#101010);z-index:2;height:62%;}
+  .key.active{background:var(--orange)!important;}
+  .key .lab{position:absolute;bottom:5px;left:0;right:0;text-align:center;font-size:10px;color:#776a55;pointer-events:none;font-weight:600;}
+  footer{color:var(--dim);font-size:11px;margin-top:12px;}
+  /* A/B compare chrome */
+  #abBar{display:flex;gap:10px;align-items:stretch;flex-wrap:wrap;margin-top:16px;}
+  .abBtn{flex:1;min-width:250px;background:var(--section);color:var(--label);border:2px solid var(--line);border-radius:12px;padding:11px 16px;cursor:pointer;font-family:Archivo,system-ui,sans-serif;text-align:left;}
+  .abBtn .abT{font-size:17px;font-weight:800;letter-spacing:1px;}
+  .abBtn .abS{font-size:11px;margin-top:3px;line-height:1.5;}
+  .abBtn.active{border-color:var(--orange);color:var(--txt);background:#2a2115;}
+  .abBtn.active .abT{color:var(--orange);}
+  #abLegend{margin-top:12px;background:var(--section);border:1px solid var(--line);border-radius:12px;padding:12px 18px 13px;font-size:12.5px;line-height:1.65;color:var(--label);}
+  #abLegend h2{margin:0 0 5px;font-size:12px;letter-spacing:2px;color:var(--orange);font-weight:600;}
+  #abLegend b{color:var(--txt);}
+  #abLegend .try{color:var(--amber);}
+  .pill.disabled{opacity:.38;cursor:not-allowed;text-decoration:line-through;}
+  .knob.disabled{opacity:.32;}
+  .knob.disabled .face{pointer-events:none;}
+</style>
+</head>
+<body>
+<div id="panel">
+  <div class="screw" style="left:15px;top:15px"></div><div class="screw" style="right:15px;top:15px"></div>
+  <div class="screw" style="left:15px;bottom:15px"></div><div class="screw" style="right:15px;bottom:15px"></div>
+
+  <header>
+    <div>
+      <div class="logo">ELFMONO</div>
+      <div class="tagline">MONOPHONIC SYNTHESIZER · A/B COMPARE</div>
+      <div style="margin-top:12px"><button id="startBtn">▶ Start audio</button></div>
+    </div>
+    <div id="lcd">
+      <div id="lcdPreset">DEEP BASS</div>
+      <div id="lcdReadout">CUTOFF 900 Hz · GLIDE 20 ms</div>
+      <div id="gateLed"></div>
+    </div>
+    <div class="topRight">
+      <div class="pills" id="presetPills"></div>
+      <div class="pills" style="margin-top:8px">
+        <button class="pill" id="holdBtn"><span class="dot"></span>HOLD</button>
+        <button class="pill on" id="legatoPill"><span class="dot"></span>LEGATO</button>
+      </div>
+      <div id="status">Tap Start, then play the keys (or A-row / Z-row on your computer keyboard). The A/B buttons below — or keys 1 and 2 — flip between the OLD and NEW builds instantly, even mid-note. On the NEW build, strike a key high for a hard hit, low for a soft one; the OLD build always plays at fixed velocity 0.9. Drag knobs up/down, scroll works too, double-click resets; Tab to a knob and use the arrow keys.</div>
+      <div class="credit">Designed by Garth Elfstrom</div>
+    </div>
+  </header>
+
+  <div id="abBar">
+    <button class="abBtn active" id="abA"><div class="abT">A · OLD BUILD</div><div class="abS">Oct 29, 2026 — 26 params · no noise source · filter release masked by the amp envelope · fixed velocity 0.9 · no BREATH preset</div></button>
+    <button class="abBtn" id="abB"><div class="abT">B · NEW BUILD</div><div class="abS">Oct 30, 2026 — 27 params · noise source + BREATH · gate-hold filter release · position velocity (top 1.00 → bottom 0.35)</div></button>
+  </div>
+  <div id="abLegend">
+    <h2>WHAT CHANGED — A (OCT 29) → B (OCT 30)</h2>
+    <div><b>1 · Noise source (B only).</b> B adds the NOISE LEVEL knob and the BREATH preset. A has no noise generator at all — its noise knob is greyed out and BREATH is B-only. <span class="try">Try it: load BREATH on B, hold a note, flip to A — the hiss vanishes; the pitched part keeps playing.</span></div>
+    <div><b>2 · Filter release.</b> On A, a long F-RELEASE is silently cut off when the amp envelope closes (measured 0.5–2.0 s after note-off: <b>RMS 0.0000</b>). On B the gate holds open for exactly the owed remainder, so the filter decay plays out (<b>RMS 0.2365</b>). <span class="try">Try it: ACID preset, F-RELEASE up to 2000 ms, RELEASE stays 120 ms — tap a low key short, then flip A/B during the tail.</span></div>
+    <div><b>3 · Velocity.</b> A plays every pointer hit at the fixed velocity 0.9 its UI always sent. B reads where you strike the key: top = 1.00, bottom = 0.35. Computer-keyboard notes are 0.9 on both sides.</div>
+    <div>Same panel, same presets, same output level on both sides — every knob move is mirrored to both engines, so flipping is instant and the patch never changes under you. Keys <b>1</b> / <b>2</b> switch sides too. One non-sound difference is deliberately <i>not</i> reproduced: A's original page never loaded its fonts (silent system-font fallback); this page embeds the fonts for both sides so the comparison is about sound. Both engines were verified headlessly with identical probe code before this page was built: deep bass RMS 0.5734 and acid 0.3647 on both, glide 0.3889 (A) vs 0.3908 (B — the release fix audible in its tail), noise-only probe silence (A) vs RMS 0.3360 (B).</div>
+  </div>
+
+  <main>
+    <section id="secOsc"><h2>OSCILLATORS</h2><div class="rule"></div><div id="oscBody"></div></section>
+    <section id="secFilt"><h2>FILTER</h2><div class="rule"></div><div id="filtBody" style="position:relative"></div></section>
+    <section id="secEnv"><h2>ENVELOPES</h2><div class="rule"></div><div id="envBody"></div></section>
+  </main>
+
+  <section id="strip"><h2>MODULATION &amp; OUTPUT</h2><div class="rule"></div>
+    <div class="stripInner">
+      <div id="scopeWrap"><canvas id="scope" width="350" height="86"></canvas><div class="scopeCap" id="scopeCap">OSC · —</div></div>
+      <div class="stripKnobs" id="stripKnobs"></div>
+    </div>
+  </section>
+
+  <div id="keys"></div>
+  <footer>ElfMono A/B compare — A: Oct 29, 2026 build (engine reconstructed from the pre-change source backup; verified against its original render measurements) · B: Oct 30, 2026 build (current). Panel design from Figma (“ElfMono — Panel Design”). Audio path is still the ScriptProcessor stopgap.</footer>
+</div>
+
+<script>/*__GLUE_A__*/</script>
+<script>/*__GLUE_B__*/</script>
+<script>
+'use strict';
+const WASM_A_B64 = "__WASM_A_B64__";
+const WASM_B_B64 = "__WASM_B_B64__";
+function b64ToBytes(b64){ const bin=atob(b64); const u=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) u[i]=bin.charCodeAt(i); return u; }
+let synth=null, actx=null, analyser=null, started=false;
+// A/B: both engines live side by side and `synth` always points at the
+// active one. Knob/preset changes are mirrored to BOTH engines (setParam /
+// applyPreset), note events go to the active one only — flipping sides is
+// instant and the patch never changes. 'A' = Oct 29 build, 'B' = Oct 30.
+let side='A'; const synths={A:null,B:null}; let lastVel=0.9;
+const $=id=>document.getElementById(id);
+
+const LOG='log';
+const DEFS={
+ 1:{name:'OSC 1 LEVEL',min:0,max:1,fmt:v=>Math.round(v*100)+'%'},
+ 3:{name:'OSC 2 DETUNE',min:-1200,max:1200,fmt:v=>(v>0?'+':'')+Math.round(v)+' ct'},
+ 4:{name:'OSC 2 LEVEL',min:0,max:1,fmt:v=>Math.round(v*100)+'%'},
+ 5:{name:'SUB LEVEL',min:0,max:1,fmt:v=>Math.round(v*100)+'%'},
+ 6:{name:'PULSE WIDTH',min:0.05,max:0.95,fmt:v=>Math.round(v*100)+'%'},
+ 7:{name:'CUTOFF',min:40,max:18000,scale:LOG,fmt:v=>v>=1000?(v/1000).toFixed(2).replace(/0$/,'')+' kHz':Math.round(v)+' Hz'},
+ 8:{name:'RESONANCE',min:0,max:0.98,fmt:v=>Math.round(v*100)+'%'},
+ 9:{name:'ENV AMOUNT',min:-1,max:1,fmt:v=>(v>0?'+':'')+Math.round(v*100)+'%'},
+ 10:{name:'KEY TRACK',min:0,max:1,fmt:v=>Math.round(v*100)+'%'},
+ 13:{name:'ATTACK',min:1,max:2000,scale:LOG,fmt:v=>Math.round(v)+' ms'},
+ 14:{name:'DECAY',min:1,max:2000,scale:LOG,fmt:v=>Math.round(v)+' ms'},
+ 15:{name:'SUSTAIN',min:0,max:1,fmt:v=>Math.round(v*100)+'%'},
+ 16:{name:'RELEASE',min:10,max:5000,scale:LOG,fmt:v=>Math.round(v)+' ms'},
+ 17:{name:'F-ATTACK',min:1,max:2000,scale:LOG,fmt:v=>Math.round(v)+' ms'},
+ 18:{name:'F-DECAY',min:1,max:2000,scale:LOG,fmt:v=>Math.round(v)+' ms'},
+ 19:{name:'F-SUSTAIN',min:0,max:1,fmt:v=>Math.round(v*100)+'%'},
+ 20:{name:'F-RELEASE',min:10,max:5000,scale:LOG,fmt:v=>Math.round(v)+' ms'},
+ 11:{name:'GLIDE',min:0,max:500,fmt:v=>Math.round(v)+' ms'},
+ 21:{name:'LFO RATE',min:0.05,max:30,scale:LOG,fmt:v=>v.toFixed(2)+' Hz'},
+ 22:{name:'LFO → FILTER',min:0,max:1,fmt:v=>Math.round(v*100)+'%'},
+ 23:{name:'LFO → PITCH',min:0,max:1,fmt:v=>Math.round(v*100)+'%'},
+ 24:{name:'DRIVE',min:0,max:1,fmt:v=>Math.round(v*100)+'%'},
+ 25:{name:'VOLUME',min:0,max:1,fmt:v=>Math.round(v*100)+'%'},
+ 26:{name:'NOISE LEVEL',min:0,max:1,fmt:v=>Math.round(v*100)+'%'},
+};
+const DEFAULTS={0:0,1:0.8,2:0,3:7,4:0.5,5:0.4,6:0.5,7:3200,8:0.25,9:0.45,10:0.3,11:60,12:1,13:3,14:180,15:0.8,16:120,17:2,18:220,19:0.25,20:160,21:5,22:0,23:0,24:0.15,25:0.8,26:0};
+const PRESETS={
+ 'INIT':{},
+ 'DEEP BASS':{7:900,8:0.3,9:0.5,5:0.9,3:5,4:0.35,11:20,14:250,15:0.9,24:0.25},
+ 'ACID':{7:700,8:0.85,9:0.9,18:300,19:0.05,14:280,15:0.35,24:0.3,4:0.2,5:0.2,11:30},
+ 'GLIDE LEAD':{7:4500,8:0.2,11:180,0:0,2:0,3:9,4:0.3,5:0,13:5,14:200,15:0.85,16:250,21:5.5,23:0.25,24:0.2},
+ 'SUB':{0:2,1:0.5,5:0.95,4:0,7:1200,8:0.1,9:0.2,24:0.1,11:40},
+ 'PULSE':{0:1,6:0.35,2:1,3:-8,4:0.35,5:0.5,7:2400,8:0.4,9:0.55,24:0.2,11:50},
+ 'BREATH':{26:0.85,1:0.25,4:0,5:0.1,7:1800,8:0.35,9:0.6,18:600,19:0.3,13:400,14:800,15:0.6,24:0.1},
+};
+const state=Object.assign({},DEFAULTS,PRESETS['DEEP BASS']);
+let currentPreset='DEEP BASS';
+function toNorm(id,v){ const c=DEFS[id]; return c.scale===LOG?Math.log(v/c.min)/Math.log(c.max/c.min):(v-c.min)/(c.max-c.min); }
+function fromNorm(id,t){ const c=DEFS[id]; t=Math.min(1,Math.max(0,t)); return c.scale===LOG?c.min*Math.pow(c.max/c.min,t):c.min+(c.max-c.min)*t; }
+function readout(id){ $('lcdReadout').textContent=(DEFS[id].name+' '+DEFS[id].fmt(state[id])).toUpperCase(); }
+function setParam(id,v,touched=true){ state[id]=v; for(const k in synths){ const s=synths[k]; if(s) s.set_param(id,v); } if(touched&&DEFS[id]) readout(id); }
+// (The A engine has no param 26: its set_param catch-all ignores the noise
+// value it is mirrored, exactly as the old build ignored anything unknown.)
+
+// ---------- knobs ----------
+const knobs=[];
+function makeKnob(parent,id,d){
+  const c=DEFS[id];
+  const wrap=document.createElement('div'); wrap.className='knob';
+  wrap.style.width=(d+48)+'px'; wrap.style.height=(d+56)+'px';
+  const cx=(d+48)/2, cy=10+d/2, R=d/2+9;
+  const dots=[];
+  for(let i=0;i<=26;i++){
+    const f=i/26, a=(135+270*f)*Math.PI/180;
+    const dot=document.createElement('div'); dot.className='ardot';
+    dot.style.left=(cx+R*Math.cos(a)-2.2)+'px'; dot.style.top=(cy+R*Math.sin(a)-2.2)+'px';
+    wrap.appendChild(dot); dots.push(dot);
+  }
+  const face=document.createElement('div'); face.className='face';
+  face.style.left='24px'; face.style.top='10px'; face.style.width=d+'px'; face.style.height=d+'px';
+  // Keyboard access + ARIA (AUDIT F4 fix): the face is a focusable slider.
+  // aria-valuenow/text are kept in sync in refresh(), the same funnel every
+  // pointer/wheel/keyboard change passes through.
+  face.tabIndex=0; face.setAttribute('role','slider'); face.setAttribute('aria-label',c.name);
+  face.setAttribute('aria-valuemin',String(c.min)); face.setAttribute('aria-valuemax',String(c.max));
+  const cap=document.createElement('div'); cap.className='cap';
+  cap.style.left=(24+d*0.19)+'px'; cap.style.top=(10+d*0.19)+'px'; cap.style.width=(d*0.62)+'px'; cap.style.height=(d*0.62)+'px';
+  const pdot=document.createElement('div'); pdot.className='pdot';
+  const lab=document.createElement('div'); lab.className='klabel'; lab.style.top=(cy+d/2+8)+'px'; lab.textContent=c.name;
+  const val=document.createElement('div'); val.className='kvalue'; val.style.top=(cy+d/2+24)+'px';
+  wrap.appendChild(face); wrap.appendChild(cap); wrap.appendChild(pdot); wrap.appendChild(lab); wrap.appendChild(val);
+  parent.appendChild(wrap);
+  const K={id,d,cx,cy,dots,pdot,val,face,wrap,
+    refresh(){
+      const norm=toNorm(id,state[id]);
+      dots.forEach((dot,i)=>{ const on=i/26<=norm+0.001; dot.style.width=dot.style.height=(on?4.4:3.2)+'px'; dot.style.background=on?'var(--orange)':'var(--track)'; });
+      const pa=(135+270*norm)*Math.PI/180, pr=d/2-9;
+      pdot.style.left=(cx+pr*Math.cos(pa)-3.5)+'px'; pdot.style.top=(cy+pr*Math.sin(pa)-3.5)+'px';
+      val.textContent=c.fmt(state[id]);
+      face.setAttribute('aria-valuenow',String(Math.round(state[id]*1000)/1000));
+      face.setAttribute('aria-valuetext',c.fmt(state[id]));
+    }};
+  let drag=null;
+  face.addEventListener('pointerdown',e=>{ e.preventDefault(); face.setPointerCapture(e.pointerId); drag={y:e.clientY,norm:toNorm(id,state[id])}; });
+  face.addEventListener('pointermove',e=>{ if(!drag) return; const range=e.shiftKey?640:190; const norm=drag.norm+(drag.y-e.clientY)/range; setParam(id,fromNorm(id,norm)); K.refresh(); });
+  face.addEventListener('pointerup',()=>drag=null);
+  face.addEventListener('pointercancel',()=>drag=null);
+  face.addEventListener('wheel',e=>{ e.preventDefault(); const norm=toNorm(id,state[id])+(e.deltaY<0?0.035:-0.035); setParam(id,fromNorm(id,norm)); K.refresh(); },{passive:false});
+  face.addEventListener('dblclick',()=>{ setParam(id,DEFAULTS[id]); K.refresh(); });
+  // Keyboard control (F4): arrows = fine step (1% of travel), PageUp/Down =
+  // coarse (10%), Home/End = min/max. Steps are in normalized space, so log
+  // params move multiplicatively. Same setParam + refresh path as drags, so
+  // LCD readout, LED ring, ARIA and engine can never drift apart.
+  face.addEventListener('keydown',e=>{
+    const cur=toNorm(id,state[id]); let t=null;
+    if(e.key==='ArrowUp'||e.key==='ArrowRight') t=cur+0.01;
+    else if(e.key==='ArrowDown'||e.key==='ArrowLeft') t=cur-0.01;
+    else if(e.key==='PageUp') t=cur+0.1;
+    else if(e.key==='PageDown') t=cur-0.1;
+    else if(e.key==='Home') t=0;
+    else if(e.key==='End') t=1;
+    if(t===null) return;
+    e.preventDefault(); setParam(id,fromNorm(id,t)); K.refresh();
+  });
+  knobs.push(K); K.refresh(); return K;
+}
+// wave chips
+const chipRows={};
+function makeWaves(parent,wid,label){
+  const block=document.createElement('div'); block.className='waveBlock';
+  block.innerHTML='<div class="wlabel">'+label+'</div>';
+  const row=document.createElement('div'); row.className='chips';
+  ['SAW','SQR','TRI'].forEach((nm,i)=>{
+    const b=document.createElement('button'); b.className='chip'+(i===Math.round(state[wid])?' on':''); b.textContent=nm;
+    b.onclick=()=>{ setParam(wid,i,false); $('lcdReadout').textContent=(label+' '+nm).toUpperCase(); row.querySelectorAll('.chip').forEach((x,j)=>x.classList.toggle('on',j===i)); };
+    row.appendChild(b);
+  });
+  chipRows[wid]=row; block.appendChild(row); parent.appendChild(block);
+}
+function buildPanel(){
+  const osc=$('oscBody');
+  const g1=document.createElement('div'); g1.className='knobGrid';
+  osc.appendChild(g1); makeKnob(g1,1,72); makeKnob(g1,3,72); makeKnob(g1,4,72); makeKnob(g1,5,72); makeKnob(g1,26,72);
+  const g2=document.createElement('div'); g2.style.display='flex'; g2.style.gap='14px'; g2.style.alignItems='flex-start';
+  const pk=document.createElement('div'); makeKnob(pk,6,56); g2.appendChild(pk);
+  const wv=document.createElement('div'); wv.style.flex='1'; makeWaves(wv,0,'OSC 1 WAVE'); makeWaves(wv,2,'OSC 2 WAVE'); g2.appendChild(wv);
+  osc.appendChild(g2);
+
+  const filt=$('filtBody');
+  const hero=document.createElement('div'); hero.style.display='flex'; hero.style.justifyContent='center'; hero.style.position='relative';
+  makeKnob(hero,7,118); filt.appendChild(hero);
+  [['40',0],['200',0.264],['1k',0.527],['5k',0.791],['18k',1]].forEach(([lbl,f])=>{
+    const a=(135+270*f)*Math.PI/180, R=94;
+    const s=document.createElement('div'); s.className='scaleLbl'; s.textContent=lbl;
+    s.style.left=(184+R*Math.cos(a))+'px'; s.style.top=(10+59+R*Math.sin(a))+'px'; hero.appendChild(s);
+  });
+  const fr=document.createElement('div'); fr.className='knobRow';
+  makeKnob(fr,8,68); makeKnob(fr,9,68); makeKnob(fr,10,68); filt.appendChild(fr);
+
+  const env=$('envBody');
+  const mkRow=(title,ids2)=>{
+    const t=document.createElement('div'); t.className='adsrTitle'; t.textContent=title; env.appendChild(t);
+    const r=document.createElement('div'); r.className='knobRow'; ids2.forEach(i=>makeKnob(r,i,44)); env.appendChild(r);
+  };
+  mkRow('AMP ENVELOPE',[13,14,15,16]);
+  mkRow('FILTER ENVELOPE',[17,18,19,20]);
+  const lr=document.createElement('div'); lr.className='legatoRow';
+  lr.innerHTML='<div><div class="wlabel" style="font-size:10px;font-weight:600;letter-spacing:1px;color:var(--label);margin-bottom:6px">LEGATO</div><div class="rocker on" id="legatoRocker"><div class="rk"></div><div class="rt">ON</div></div></div><div class="explain">Play overlapping notes: envelopes do not retrigger, pitch glides to the new note.</div>';
+  env.appendChild(lr);
+  $('legatoRocker').onclick=()=>setLegato(state[12]<0.5);
+
+  const strip=$('stripKnobs');
+  makeKnob(strip,21,60); makeKnob(strip,22,60); makeKnob(strip,23,60); makeKnob(strip,11,60); makeKnob(strip,24,60); makeKnob(strip,25,72);
+}
+function refreshAllKnobs(){ knobs.forEach(k=>k.refresh()); [0,2].forEach(wid=>{ if(chipRows[wid]) chipRows[wid].querySelectorAll('.chip').forEach((x,j)=>x.classList.toggle('on',j===Math.round(state[wid]))); }); }
+function setLegato(on){
+  setParam(12,on?1:0,false);
+  $('legatoRocker').classList.toggle('on',on);
+  $('legatoRocker').querySelector('.rt').textContent=on?'ON':'OFF';
+  $('legatoPill').classList.toggle('on',on);
+  $('lcdReadout').textContent='LEGATO '+(on?'ON':'OFF');
+}
+// presets
+function applyPreset(name){
+  currentPreset=name;
+  Object.assign(state,DEFAULTS,PRESETS[name]||{});
+  Object.keys(state).forEach(id=>{ for(const k in synths){ const s=synths[k]; if(s) s.set_param(+id,state[id]); } });
+  refreshAllKnobs(); setLegato(state[12]>=0.5);
+  $('lcdPreset').textContent=name;
+  $('lcdReadout').textContent='PRESET LOADED';
+  $('presetPills').querySelectorAll('.pill').forEach(p=>p.classList.toggle('active',p.textContent===name));
+}
+function buildPresets(){
+  Object.keys(PRESETS).forEach(name=>{
+    const b=document.createElement('button'); b.className='pill'+(name===currentPreset?' active':''); b.textContent=name; b.dataset.preset=name;
+    b.onclick=()=>{ if(name==='BREATH'&&side==='A') return; ensureAudio(); applyPreset(name); };
+    $('presetPills').appendChild(b);
+  });
+}
+// ---------- keyboard ----------
+const NAMES=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+let hold=false, heldNote=null, dragNote=null;
+// Position velocity (AUDIT F5 fix, Garth's pick 2026-10-30): where on a key
+// you strike sets the velocity — top of the key = hardest, bottom = softest.
+// Linear map over the key's own height: velocity = VEL_MIN + (1 - yFrac) *
+// (VEL_MAX - VEL_MIN), yFrac = (clientY - rect.top) / rect.height clamped
+// 0..1. So top = 1.00, middle = 0.675, bottom = 0.35. Glissando entries use
+// the entered key's own rect + the entry event's Y. Keyboard input has no
+// position and keeps the fixed 0.9 default in noteOn.
+const VEL_MIN=0.35, VEL_MAX=1.0;
+function posVel(e,el){ const r=el.getBoundingClientRect(); if(!r.height) return 0.9; const f=Math.min(1,Math.max(0,(e.clientY-r.top)/r.height)); return VEL_MIN+(1-f)*(VEL_MAX-VEL_MIN); }
+// A/B: the OLD build's UI sent the fixed 0.9 for every hit (AUDIT F5 was
+// still open) — side A keeps that behavior exactly. Position velocity
+// exists only on side B.
+function strikeVel(e,el){ return side==='A' ? 0.9 : posVel(e,el); }
+function markKey(n,on){ const el=keyEls[n]; if(el) el.classList.toggle('active',on); }
+function noteOn(n,vel){
+  if(!synth) return;
+  if(hold&&heldNote!==null&&heldNote!==n){ synth.note_off(heldNote); markKey(heldNote,false); }
+  synth.note_on(n,vel||0.9); lastVel=vel||0.9; heldNote=n; markKey(n,true); $('gateLed').classList.add('on');
+  $('scopeCap').textContent='OSC · '+NAMES[n%12]+(Math.floor(n/12)-1);
+}
+function noteOff(n){
+  if(!synth||hold) return;
+  synth.note_off(n); if(heldNote===n) heldNote=null; markKey(n,false);
+  if(!heldNote) $('gateLed').classList.remove('on');
+}
+const keyEls={};
+function buildKeys(){
+  const wrap=$('keys'); const first=36,last=71;
+  let whites=0; for(let n=first;n<=last;n++) if(!NAMES[n%12].includes('#')) whites++;
+  const wW=100/whites; let wi=0;
+  for(let n=first;n<=last;n++){
+    const name=NAMES[n%12], black=name.includes('#');
+    const el=document.createElement('div'); el.className='key '+(black?'black':'white');
+    if(black){ el.style.left=((wi-0.31)*wW)+'%'; el.style.width=(wW*0.62)+'%'; }
+    else{ el.style.left=(wi*wW)+'%'; el.style.width='calc('+wW+'% - 2px)'; wi++;
+      if(n%12===0){ const l=document.createElement('div'); l.className='lab'; l.textContent=name+(Math.floor(n/12)-1); el.appendChild(l); } }
+    keyEls[n]=el;
+    el.addEventListener('pointerdown',e=>{ e.preventDefault(); ensureAudio(); el.setPointerCapture(e.pointerId); noteOn(n,strikeVel(e,el)); dragNote=n; });
+    el.addEventListener('pointerenter',e=>{ if(dragNote!==null&&dragNote!==n){ const old=dragNote; noteOn(n,strikeVel(e,el)); if(synth&&!hold){ synth.note_off(old); markKey(old,false);} dragNote=n; } });
+    el.addEventListener('pointerup',()=>{ noteOff(n); if(dragNote===n) dragNote=null; });
+    el.addEventListener('pointercancel',()=>{ noteOff(n); if(dragNote===n) dragNote=null; });
+    wrap.appendChild(el);
+  }
+}
+const KEYMAP={KeyA:60,KeyW:61,KeyS:62,KeyD:63,KeyE:64,KeyF:65,KeyT:66,KeyG:67,KeyY:68,KeyH:69,KeyU:70,KeyJ:71,KeyK:72,KeyO:73,KeyL:74,Semicolon:75,Quote:76,KeyZ:48,KeyX:50,KeyC:52,KeyV:53,KeyB:55,KeyN:57,Comma:59};
+window.addEventListener('keydown',e=>{ if(e.code==='Digit1'){ setSide('A'); return; } if(e.code==='Digit2'){ setSide('B'); return; } const m=KEYMAP[e.code]; if(m&&!e.repeat){ ensureAudio(); noteOn(m); } });
+window.addEventListener('keyup',e=>{ const m=KEYMAP[e.code]; if(m) noteOff(m); });
+// ---------- A/B switching ----------
+function setSide(s){
+  if(s===side){ syncSideUI(); return; }
+  const wasHeld=heldNote;
+  if(synth&&wasHeld!==null) synth.note_off(wasHeld);
+  side=s; synth=synths[s];
+  if(synth&&wasHeld!==null) synth.note_on(wasHeld, s==='A'?0.9:lastVel);
+  if(s==='A'&&currentPreset==='BREATH'){
+    applyPreset('INIT');
+    $('status').textContent='BREATH exists only on the NEW build — INIT is loaded on A. Press 2 (or the B button) to go back.';
+  }
+  syncSideUI();
+}
+function syncSideUI(){
+  $('abA').classList.toggle('active',side==='A');
+  $('abB').classList.toggle('active',side==='B');
+  document.querySelectorAll('#presetPills .pill').forEach(p=>{
+    if(p.dataset.preset==='BREATH'){ p.classList.toggle('disabled',side==='A'); p.title=side==='A'?'New build only':''; }
+  });
+  const nk=knobs.find(k=>k.id===26);
+  if(nk){ nk.wrap.classList.toggle('disabled',side==='A'); nk.face.tabIndex=side==='A'?-1:0; }
+  if(started) $('lcdReadout').textContent='BUILD '+side+(side==='A'?' · OLD — OCT 29':' · NEW — OCT 30');
+}
+// ---------- audio ----------
+async function ensureAudio(){
+  if(started){ if(actx.state==='suspended') actx.resume(); return; }
+  started=true; $('status').textContent='Loading synth engine…';
+  await wasm_bindgen_a.initSync({module:b64ToBytes(WASM_A_B64)});
+  await wasm_bindgen_b.initSync({module:b64ToBytes(WASM_B_B64)});
+  actx=new (window.AudioContext||window.webkitAudioContext)({latencyHint:'interactive'});
+  synths.A=new wasm_bindgen_a.WasmSynth(actx.sampleRate);
+  synths.B=new wasm_bindgen_b.WasmSynth(actx.sampleRate);
+  Object.keys(state).forEach(id=>{ synths.A.set_param(+id,state[id]); synths.B.set_param(+id,state[id]); });
+  synth=synths[side];
+  const node=actx.createScriptProcessor(1024,0,2);
+  analyser=actx.createAnalyser(); analyser.fftSize=2048;
+  node.onaudioprocess=e=>{ const block=synth.render_js(1024); e.outputBuffer.getChannelData(0).set(block); e.outputBuffer.getChannelData(1).set(block); };
+  node.connect(analyser); analyser.connect(actx.destination);
+  await actx.resume();
+  $('status').textContent='Playing BUILD '+side+' at '+actx.sampleRate+' Hz. Keys 1/2 (or the A/B buttons) flip builds — try it mid-note, and during a long filter-release tail. Drag across keys for legato glides. Knobs: Tab to focus, arrows fine, PageUp/Down coarse, Home/End min/max.'; syncSideUI();
+  drawScope();
+}
+function drawScope(){
+  const cv=$('scope'), g=cv.getContext('2d'); const data=new Uint8Array(2048);
+  (function loop(){ requestAnimationFrame(loop); if(!analyser) return;
+    analyser.getByteTimeDomainData(data);
+    g.fillStyle='#0d1308'; g.fillRect(0,0,cv.width,cv.height);
+    g.strokeStyle='#ff8b1a'; g.lineWidth=2; g.beginPath();
+    for(let i=0;i<data.length;i+=4){ const x=i/data.length*cv.width, y=data[i]/255*cv.height; i===0?g.moveTo(x,y):g.lineTo(x,y); }
+    g.stroke(); })();
+}
+// ---------- wire up ----------
+buildPanel(); buildPresets(); buildKeys(); refreshAllKnobs();
+$('legatoPill').onclick=()=>setLegato(state[12]<0.5);
+$('holdBtn').onclick=e=>{
+  hold=!hold; e.currentTarget.classList.toggle('on',hold);
+  if(!hold&&heldNote!==null&&synth){ synth.note_off(heldNote); markKey(heldNote,false); heldNote=null; $('gateLed').classList.remove('on'); }
+};
+$('startBtn').onclick=ensureAudio;
+$('abA').onclick=()=>setSide('A');
+$('abB').onclick=()=>setSide('B');
+syncSideUI();
+</script>
+</body>
+</html>

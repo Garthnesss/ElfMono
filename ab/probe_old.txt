@@ -1,0 +1,7 @@
+deep_bass_C2: rms=0.5734 (-4.8 dBFS) peak=0.7142 hf_ratio=0.022 nan=false
+acid_A1: rms=0.3647 (-8.8 dBFS) peak=0.7143 hf_ratio=0.078 nan=false
+glide_lead_phrase: rms=0.3889 (-8.2 dBFS) peak=0.7038 hf_ratio=0.219 nan=false
+filt_release tail window (0.5-2.0 s after note-off): long(2000 ms)=0.0000 short(160 ms)=0.0000
+filt_release long-vs-short: diff_rms=0.0091
+param26 noise-only probe (2nd half): rms=0.0000
+ab_probe OK
